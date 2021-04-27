@@ -1,0 +1,214 @@
+#!/usr/bin/env perl
+
+use v5.10;
+use strict;
+use warnings;
+use RRDTool::OO;
+use FindBin qw($Bin);
+use POSIX qw(strftime);
+use Path::Tiny;
+use Template;
+
+#--- definitions
+
+# directory, where the rrd files will be stored; this can be absoulte path,
+# relative path or undefined
+my $rrddir = 'rrd';
+
+# directory where images and HTML files will be created
+my $dstdir = 'html';
+
+# graph dimensions
+my ($img_w, $img_h) = (800, 160);
+
+
+#==============================================================================
+#=== FUNCTIONS ================================================================
+#==============================================================================
+
+sub get_location
+{
+  my $dir = shift;
+  my $path = path($Bin);
+  
+  # return default path if no argument
+  return $path if !$dir;
+  
+  # get absolute/relative path if argument is spefied
+  if(path($dir)->is_absolute) {
+    $path = path($dir);
+  } else {
+    $path = $path->child($dir);
+  }
+  
+  # ensure the resulting path's existence
+  if(!$path->exists) {
+    die "Directory " . $path . " does not exist";
+  }
+
+  # finish
+  return $path;
+}
+
+
+#==============================================================================
+#=== MAIN =====================================================================
+#==============================================================================
+
+#--- get loadaverage
+
+my $loadavg = '/proc/loadavg';
+
+open(my $fh, $loadavg) or die;
+my $l = <$fh>;
+$l =~ /^[0-9.]+\s[0-9.]+\s([0-9.]+)\s/;
+my $load = $1;
+close($fh);
+
+#--- get hostname
+
+open($fh, '-|', 'hostname') or die;
+my $hostname = <$fh>;
+chomp($hostname);
+close($fh);
+
+#--- get location of the rrd file
+
+my $rrdfile = get_location($rrddir)->child('sysload.rrd');
+
+#--- get RRDTool::OO instance
+
+my $rrd = RRDTool::OO->new(
+  file => $rrdfile->canonpath,
+);
+
+#--- create RRD file if it does not already exist
+
+if(!$rrdfile->exists) {
+  $rrd->create(
+    step => 60,
+    data_source => {
+      name => 'sysload',
+      type => 'GAUGE'
+    },
+    # 1 week at 1 minute interval
+    archive => {
+      cpoints => 1,
+      rows => 7*24*60
+    },
+    # 1 month at 10 minute interval
+    archive => {
+      cpoints => 10,
+      rows => 30*24*6,
+      cfunc => 'AVERAGE'
+    },
+    # 1 year at 2 hour interval
+    archive => {
+      cpoints => 120,
+      rows => 365*12,
+      cfunc => 'AVERAGE'
+    },
+    # 10 years at 1 day interval
+    archive => {
+      cpoints => 1440,
+      rows => 365*10,
+      cfunc => 'AVERAGE'
+    }
+  );
+}
+
+#--- update RRD database
+
+$rrd->update(
+  values => {
+    sysload => $load
+  }
+);
+
+#--- generate graphs
+
+my $dst = get_location($dstdir);
+my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+  
+$rrd->graph(
+  image => $dst->child('sysload-day.png')->canonpath,
+  start => (time() - 24*3600),
+  end => time(),
+  lower_limit => 0,
+  upper_limit => 1,
+  width => $img_w,
+  height => $img_h,
+  draw => {
+    type => 'area',
+    color => '00CC00',
+    dsname => 'sysload',
+    legend => 'CPU Load'
+  }
+) if !($min % 5);
+
+$rrd->graph(
+  image => $dst->child('sysload-week.png')->canonpath,
+  start => (time() - 7*24*3600),
+  end => time(),
+  lower_limit => 0,
+  upper_limit => 1,
+  width => $img_w,
+  height => $img_h,
+  draw => {
+    type => 'area',
+    color => '00CC00',
+    dsname => 'sysload',
+    legend => 'CPU Load'
+  }
+) if !$min;
+
+$rrd->graph(
+  image => $dst->child('sysload-month.png')->canonpath,
+  start => (time() - 30*24*3600),
+  end => time(),
+  lower_limit => 0,
+  upper_limit => 1,
+  width => $img_w,
+  height => $img_h,
+  draw => {
+    type => 'area',
+    color => '00CC00',
+    dsname => 'sysload',
+    legend => 'CPU Load'
+  }
+) if !$hour && !$min;
+
+$rrd->graph(
+  image => $dst->child('sysload-year.png')->canonpath,
+  start => (time() - 365*24*3600),
+  end => time(),
+  lower_limit => 0,
+  upper_limit => 1,
+  width => $img_w,
+  height => $img_h,
+  draw => {
+    type => 'area',
+    color => '00CC00',
+    dsname => 'sysload',
+    legend => 'CPU Load'
+  }
+) if !$hour && !$min;
+
+#--- create html file
+
+my $tt = Template->new({
+  ABSOLUTE => 1,
+  ENCODING => 'utf8',
+});
+
+if(!($min % 5)) {
+  $tt->process(
+    "$Bin/index.tt",
+    {
+      gentime => strftime('%c', localtime()),
+      hostname => $hostname
+    },
+    "$dstdir/index.html",
+    { binmode => ':utf8' }
+  ) || die $tt->error() . "\n";
+}
